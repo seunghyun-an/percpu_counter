@@ -1,0 +1,1 @@
+#define __read_mostly __section(".data..read_mostly")
