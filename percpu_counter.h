@@ -23,8 +23,10 @@
 
 struct percpu_counter {
 	spinlock_t lock;
+	int padding1;
 	int64_t count;
-	cachepadded_int32_t **counters;
+	cachepadded_int64_t **counters;
+	char padding2[256-24];
 };
 
 extern int percpu_counter_batch;
@@ -40,7 +42,7 @@ int64_t __percpu_counter_sum(struct percpu_counter *fbc);
 int __percpu_counter_compare(struct percpu_counter *fbc, int64_t rhs, int32_t batch);
 bool __percpu_counter_limited_add(struct percpu_counter *fbc, int64_t limit,
 				  int64_t amount, int32_t batch);
-void percpu_counter_sync(struct percpu_counter *fbc);
+void percpu_counter_sync(struct percpu_counter *fbc, int cpu_id);
 
 static inline int percpu_counter_compare(struct percpu_counter *fbc, int64_t rhs)
 {

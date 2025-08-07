@@ -5,8 +5,9 @@ LDFLAGS  := -lnuma
 
 # Targets
 TARGET   := counter_benchmark
-SRCS     := main.cpp
-OBJS     := $(SRCS:.cpp=.o)
+SRCS     := main.c percpu_counter.c spinlock.c
+OBJS     := $(SRCS:.c=.o)
+HDRS	 := *.h
 
 .PHONY: all clean
 
@@ -15,7 +16,7 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $(OBJS) $(LDFLAGS)
 
-%.o: %.cpp funcs.h
+%.o: %.c  $(HDRS)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 clean:

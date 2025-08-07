@@ -2,10 +2,12 @@
 /*
  * Fast batching percpu counters.
  */
+#define unlikely(x) __builtin_expect(!!(x), 0)
 
 #include "percpu_counter.h"
 #include <stdlib.h>
 #include <errno.h>
+#include <stdatomic.h>
 
 static inline void debug_percpu_counter_activate(struct percpu_counter *fbc)
 { }
@@ -18,12 +20,12 @@ void percpu_counter_set(struct percpu_counter *fbc, int64_t amount)
 
 	spinlock_lock(&fbc->lock);
 	for (cpu=0;cpu<NCPU;cpu++) {
-		fbc->counters[cpu] = (cachepadded_int32_t *)calloc(1, sizeof(cachepadded_int32_t));
+		fbc->counters[cpu] = (cachepadded_int64_t *)calloc(1, sizeof(cachepadded_int64_t));
 	}
 	fbc->count = amount;
 	spinlock_unlock(&fbc->lock);
 }
-EXPORT_SYMBOL(percpu_counter_set);
+// EXPORT_SYMBOL(percpu_counter_set);
 
 /*
  * Add to a counter while respecting batch size.
@@ -45,25 +47,24 @@ EXPORT_SYMBOL(percpu_counter_set);
 void percpu_counter_add_batch(struct percpu_counter *fbc, int64_t amount, int32_t batch, uint32_t cpu_id)
 {
 	int64_t count;
-	unsigned long flags;
 
-	count = *fbc->counters[cpu_id];
+	count = fbc->counters[cpu_id]->val;
 	do {
 		if (unlikely(abs(count + amount) >= batch)) {
-			raw_spin_lock_irqsave(&fbc->lock, flags);
+			spinlock_lock(&fbc->lock);
 			/*
 			 * Note: by now we might have migrated to another CPU
 			 * or the value might have changed.
 			 */
-			count = __this_cpu_read(*fbc->counters);
+			count = fbc->counters[cpu_id]->val;
 			fbc->count += count + amount;
-			__this_cpu_sub(*fbc->counters, count);
-			raw_spin_unlock_irqrestore(&fbc->lock, flags);
+			fbc->counters[cpu_id]->val -= count;
+			spinlock_unlock(&fbc->lock);
 			return;
 		}
-	} while (!this_cpu_try_cmpxchg(*fbc->counters, &count, count + amount));
+	} while (!atomic_compare_exchange_strong(&fbc->counters[cpu_id]->val, &count, count + amount));
 }
-EXPORT_SYMBOL(percpu_counter_add_batch);
+// EXPORT_SYMBOL(percpu_counter_add_batch);
 
 /*
  * For percpu_counter with a big batch, the devication of its count could
@@ -71,18 +72,18 @@ EXPORT_SYMBOL(percpu_counter_add_batch);
  * counter's batch could be runtime decreased to get a better accuracy,
  * which can be achieved by running this sync function on each CPU.
  */
-void percpu_counter_sync(struct percpu_counter *fbc)
+void percpu_counter_sync(struct percpu_counter *fbc, int cpu_id)
 {
 	unsigned long flags;
 	int64_t count;
 
-	raw_spin_lock_irqsave(&fbc->lock, flags);
-	count = __this_cpu_read(*fbc->counters);
+	spinlock_lock(&fbc->lock);
+	count = fbc->counters[cpu_id]->val;
 	fbc->count += count;
-	__this_cpu_sub(*fbc->counters, count);
-	raw_spin_unlock_irqrestore(&fbc->lock, flags);
+	fbc->counters[cpu_id]->val -= count;
+	spinlock_unlock(&fbc->lock);
 }
-EXPORT_SYMBOL(percpu_counter_sync);
+// EXPORT_SYMBOL(percpu_counter_sync);
 
 /*
  * Add up all the per-cpu counts, return the result.  This is a more accurate
@@ -102,23 +103,23 @@ int64_t __percpu_counter_sum(struct percpu_counter *fbc)
 	int cpu;
 	unsigned long flags;
 
-	raw_spin_lock_irqsave(&fbc->lock, flags);
+	spinlock_lock(&fbc->lock);
 	ret = fbc->count;
 	for (cpu=0;cpu<NCPU;cpu++){
 		int32_t *pcount = fbc->counters[cpu];
 		ret += *pcount;
 	}
-	raw_spin_unlock_irqrestore(&fbc->lock, flags);
+	spinlock_unlock(&fbc->lock);
 	return ret;
 }
-EXPORT_SYMBOL(__percpu_counter_sum);
+// EXPORT_SYMBOL(__percpu_counter_sum);
 
 int percpu_counter_init(struct percpu_counter *fbc, int64_t amount)
 {
 	size_t counter_size;
 	uint32_t i;
 
-	uint32_t *counters = calloc(NCPU, sizeof(cachepadded_int32_t *));
+	uint32_t *counters = calloc(NCPU, sizeof(cachepadded_int64_t *));
 	if (!counters) {
 		fbc->counters = NULL;
 		return -ENOMEM;
@@ -133,56 +134,39 @@ int percpu_counter_init(struct percpu_counter *fbc, int64_t amount)
 
 	return 0;
 }
-EXPORT_SYMBOL(percpu_counter_init);
+// EXPORT_SYMBOL(percpu_counter_init);
 
 void percpu_counter_destroy(struct percpu_counter *fbc)
 {
 	uint32_t i;
 
-	if (WARN_ON_ONCE(!fbc))
-		return;
-
-	if (!fbc[0].counters)
+	if (!fbc->counters)
 		return;
 
 	debug_percpu_counter_deactivate(fbc);
 
-	free_percpu(fbc[0].counters);
+	for (int cpu=0; cpu <NCPU; cpu++){
+		free(fbc->counters[cpu]);
+	}
 
+	free(fbc->counters);
 	fbc->counters = NULL;
 }
 EXPORT_SYMBOL(percpu_counter_destroy_many);
 
-int percpu_counter_batch = 32;
-EXPORT_SYMBOL(percpu_counter_batch);
+int percpu_counter_batch = 168;
+// EXPORT_SYMBOL(percpu_counter_batch);
 
-static int compute_batch_value(unsigned int cpu)
-{
-	int nr = num_online_cpus();
+// static int compute_batch_value(unsigned int cpu)
+// {
+// 	int nr = NCPU;
 
-	percpu_counter_batch = max(32, nr*2);
-	return 0;
-}
+// 	percpu_counter_batch = nr*2;
+// 	return 0;
+// }
 
 static int percpu_counter_cpu_dead(unsigned int cpu)
 {
-#ifdef CONFIG_HOTPLUG_CPU
-	struct percpu_counter *fbc;
-
-	compute_batch_value(cpu);
-
-	spin_lock_irq(&percpu_counters_lock);
-	list_for_each_entry(fbc, &percpu_counters, list) {
-		int32_t *pcount;
-
-		raw_spin_lock(&fbc->lock);
-		pcount = per_cpu_ptr(fbc->counters, cpu);
-		fbc->count += *pcount;
-		*pcount = 0;
-		raw_spin_unlock(&fbc->lock);
-	}
-	spin_unlock_irq(&percpu_counters_lock);
-#endif
 	return 0;
 }
 
@@ -190,28 +174,28 @@ static int percpu_counter_cpu_dead(unsigned int cpu)
  * Compare counter against given value.
  * Return 1 if greater, 0 if equal and -1 if less
  */
-int __percpu_counter_compare(struct percpu_counter *fbc, int64_t rhs, int32_t batch)
-{
-	int64_t	count;
+// int __percpu_counter_compare(struct percpu_counter *fbc, int64_t rhs, int32_t batch)
+// {
+// 	int64_t	count;
 
-	count = percpu_counter_read(fbc);
-	/* Check to see if rough count will be sufficient for comparison */
-	if (abs(count - rhs) > (batch * num_online_cpus())) {
-		if (count > rhs)
-			return 1;
-		else
-			return -1;
-	}
-	/* Need to use precise count */
-	count = percpu_counter_sum(fbc);
-	if (count > rhs)
-		return 1;
-	else if (count < rhs)
-		return -1;
-	else
-		return 0;
-}
-EXPORT_SYMBOL(__percpu_counter_compare);
+// 	count = percpu_counter_read(fbc);
+// 	/* Check to see if rough count will be sufficient for comparison */
+// 	if (abs(count - rhs) > (batch * num_online_cpus())) {
+// 		if (count > rhs)
+// 			return 1;
+// 		else
+// 			return -1;
+// 	}
+// 	/* Need to use precise count */
+// 	count = percpu_counter_sum(fbc);
+// 	if (count > rhs)
+// 		return 1;
+// 	else if (count < rhs)
+// 		return -1;
+// 	else
+// 		return 0;
+// }
+// EXPORT_SYMBOL(__percpu_counter_compare);
 
 /*
  * Compare counter, and add amount if total is: less than or equal to limit if
@@ -225,6 +209,7 @@ EXPORT_SYMBOL(__percpu_counter_compare);
  * Overflow beyond int64_t_MAX is not allowed for: counter, limit and amount
  * are all assumed to be sane (far from int64_t_MIN and int64_t_MAX).
  */
+
 // bool __percpu_counter_limited_add(struct percpu_counter *fbc,
 // 				  int64_t limit, int64_t amount, int32_t batch)
 // {
