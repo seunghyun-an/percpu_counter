@@ -9,6 +9,7 @@
 
 #include "spinlock.h"
 #include "stdbool.h"
+#include "cpu.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdalign.h> // For alignas
@@ -18,11 +19,6 @@
 /* percpu_counter batch for local add or sub */
 #define PERCPU_COUNTER_LOCAL_BATCH	INT32_MAX
 
-#define NCPU 84
-
-// Assuming a 64-byte cache line
-#define CACHE_LINE_SIZE 64
-#define cachepadded_int32_t alignas(CACHE_LINE_SIZE) int32_t
 
 
 struct percpu_counter {

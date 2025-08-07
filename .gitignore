@@ -61,5 +61,3 @@ res*
 benchmark
 memory_benchmark
 tmp*
-
-cpu.h
