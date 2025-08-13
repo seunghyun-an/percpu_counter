@@ -57,9 +57,13 @@ __pycache__
 res
 res/*
 res*
+output*
 
 benchmark
 memory_benchmark
 tmp*
 
 cpu.h
+
+2025*
+AMD*

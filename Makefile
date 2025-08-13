@@ -1,6 +1,6 @@
 # Compiler and flags
 CXX      := gcc
-CXXFLAGS := -std=c11 -O2 -Wall -Wextra -pthread
+CXXFLAGS := -std=c11 -O2 -Wall -Wextra -pthread -g
 LDFLAGS  := -lnuma
 
 # Targets

@@ -44,13 +44,10 @@ void percpu_counter_set(struct percpu_counter *fbc, int64_t amount)
  * 1. the fast path uses local cmpxchg (note: no lock prefix)
  * 2. the slow path operates with interrupts disabled
  */
-void percpu_counter_add_batch(struct percpu_counter *fbc, int64_t amount, int32_t batch, uint32_t cpu_id)
-{
+void update_core(struct percpu_counter *fbc, int64_t amount, int32_t batch, uint32_t cpu_id) {
 	int64_t count;
 
 	count = fbc->counters[cpu_id]->val;
-	do {
-		if (unlikely(abs(count + amount) >= batch)) {
 			spinlock_lock(&fbc->lock);
 			/*
 			 * Note: by now we might have migrated to another CPU
@@ -60,6 +57,17 @@ void percpu_counter_add_batch(struct percpu_counter *fbc, int64_t amount, int32_
 			fbc->count += count + amount;
 			fbc->counters[cpu_id]->val -= count;
 			spinlock_unlock(&fbc->lock);
+
+}
+
+void percpu_counter_add_batch(struct percpu_counter *fbc, int64_t amount, int32_t batch, uint32_t cpu_id)
+{
+	int64_t count;
+
+	count = fbc->counters[cpu_id]->val;
+	do {
+		if (unlikely(abs(count + amount) >= batch)) {
+			update_core(fbc, amount, batch, cpu_id);
 			return;
 		}
 	} while (!atomic_compare_exchange_strong(&fbc->counters[cpu_id]->val, &count, count + amount));
